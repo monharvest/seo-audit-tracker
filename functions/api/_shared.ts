@@ -188,9 +188,37 @@ function ageInDays(fromDate: Date): number {
   return Math.floor((now - fromDate.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+function extractSitemapHintsFromRobots(robotsTxt: string, base: string): string[] {
+  const out: string[] = [];
+  const lines = robotsTxt.split(/\r?\n/);
+
+  for (const line of lines) {
+    const match = line.match(/^sitemap\s*:\s*(.+)$/i);
+    const candidate = match?.[1]?.trim();
+    if (!candidate) continue;
+
+    try {
+      out.push(new URL(candidate, base).toString());
+    } catch {
+      // Ignore malformed sitemap URLs in robots.txt
+    }
+  }
+
+  return out;
+}
+
 async function fetchSitemapAudit(base: string): Promise<SitemapAuditResult> {
-  const candidates = [`${base}/sitemap_index.xml`, `${base}/sitemap.xml`];
-  const queue = [...candidates];
+  const robots = await fetchHtml(`${base}/robots.txt`);
+  const robotsSitemaps = robots.ok ? extractSitemapHintsFromRobots(robots.html, base) : [];
+  const candidates = [
+    `${base}/sitemap_index.xml`,
+    `${base}/sitemap.xml`,
+    `${base}/sitemap-index.xml`,
+    `${base}/sitemap.index.xml`,
+    ...robotsSitemaps,
+  ];
+  const uniqueCandidates = [...new Set(candidates)];
+  const queue = [...uniqueCandidates];
   const visited = new Set<string>();
   const seenUrls = new Set<string>();
   const locCounts = new Map<string, number>();
@@ -519,7 +547,7 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
 
   const crawlCoverageIssues: string[] = [];
   if (sitemapEntries.length === 0) {
-    crawlCoverageIssues.push("No parseable sitemap entries found at /sitemap.xml or /sitemap_index.xml.");
+    crawlCoverageIssues.push("No parseable sitemap entries found at common sitemap paths or robots.txt Sitemap directives.");
   } else {
     const host = new URL(base).host;
     const staleCount = sitemapEntries
