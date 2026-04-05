@@ -10,7 +10,7 @@
     "start": "NODE_ENV=production node dist/index.js",
     "preview": "vite preview --host",
     "dev:cf": "wrangler pages dev dist/public",
-    "deploy:cf": "wrangler pages deploy dist/public",
+    "deploy:cf": "wrangler pages deploy dist/public --project-name seo-audit-tracker --branch production",
     "check": "tsc --noEmit",
     "format": "prettier --write ."
   },

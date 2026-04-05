@@ -81,7 +81,7 @@ function extractInternalPaths(html: string, base: string): string[] {
   return [...out];
 }
 
-async function fetchHtml(url: string): Promise<{ ok: boolean; status: number; html: string }> {
+async function fetchHtml(url: string): Promise<{ ok: boolean; status: number; html: string; error?: string }> {
   try {
     const res = await fetch(url, {
       redirect: "follow",
@@ -91,8 +91,21 @@ async function fetchHtml(url: string): Promise<{ ok: boolean; status: number; ht
     });
     const html = await res.text();
     return { ok: res.ok, status: res.status, html };
-  } catch {
-    return { ok: false, status: 0, html: "" };
+  } catch (firstError) {
+    // Some runtimes or upstream WAF rules reject custom bot-like headers.
+    // Retry without custom headers before marking as network failure.
+    try {
+      const res = await fetch(url, { redirect: "follow" });
+      const html = await res.text();
+      return { ok: res.ok, status: res.status, html };
+    } catch (secondError) {
+      const error = secondError instanceof Error
+        ? secondError.message
+        : firstError instanceof Error
+          ? firstError.message
+          : "Unknown fetch error";
+      return { ok: false, status: 0, html: "", error };
+    }
   }
 }
 
@@ -104,9 +117,15 @@ async function fetchPageSpeed(url: string, strategy: "mobile" | "desktop", env: 
     endpoint.searchParams.set("category", "performance");
     if (env.PAGE_SPEED_API_KEY) endpoint.searchParams.set("key", env.PAGE_SPEED_API_KEY);
 
-    const res = await fetch(endpoint.toString(), {
-      headers: { "user-agent": "seo-audit-tracker/1.0" },
-    });
+    let res: Response;
+    try {
+      res = await fetch(endpoint.toString(), {
+        headers: { "user-agent": "seo-audit-tracker/1.0" },
+      });
+    } catch {
+      // Retry without custom headers when environment forbids overriding User-Agent.
+      res = await fetch(endpoint.toString());
+    }
 
     if (!res.ok) {
       return { ok: false, error: `PageSpeed request failed (${res.status}) for ${strategy}` };
@@ -218,6 +237,7 @@ async function fetchSitemapAudit(base: string): Promise<SitemapAuditResult> {
     ...robotsSitemaps,
   ];
   const uniqueCandidates = [...new Set(candidates)];
+  const rootCandidateSet = new Set(uniqueCandidates);
   const queue = [...uniqueCandidates];
   const visited = new Set<string>();
   const seenUrls = new Set<string>();
@@ -234,7 +254,16 @@ async function fetchSitemapAudit(base: string): Promise<SitemapAuditResult> {
 
     const res = await fetchHtml(sitemapUrl);
     if (!res.ok) {
-      sitemapWarnings.push(`${sitemapUrl} fetch failed (${res.status || "network-error"})`);
+      // Optional root fallback paths can legitimately 404 even when a valid sitemap exists.
+      if (res.status === 404 && rootCandidateSet.has(sitemapUrl)) {
+        continue;
+      }
+      const failureReason = res.status
+        ? String(res.status)
+        : res.error
+          ? `network-error: ${res.error}`
+          : "network-error";
+      sitemapWarnings.push(`${sitemapUrl} fetch failed (${failureReason})`);
       continue;
     }
 
@@ -478,70 +507,7 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
     statuses["perf-2"] = "in-progress";
   }
 
-  if (!home.ok) {
-    notes.push(`Home page fetch failed with status ${home.status || "network-error"}.`);
-  }
-
-  const methodologyPaths = [
-    "/our-review-methodology/",
-    "/review-methodology/",
-    "/methodology/",
-    "/how-we-review/",
-    "/how-we-test/",
-    "/editorial-process/",
-  ];
-  let methodologyFound: string | null = null;
-  for (const mp of methodologyPaths) {
-    const r = await fetchHtml(`${base}${mp}`);
-    if (r.ok) {
-      methodologyFound = mp;
-      break;
-    }
-  }
-  statuses["eeat-2"] = methodologyFound ? "done" : "todo";
-
-  const brokenLinks: string[] = [];
-  if (home.ok) {
-    const internalPaths = extractInternalPaths(home.html, base).slice(0, 30);
-    const probeResults = await Promise.all(
-      internalPaths.map(async (p) => {
-        const url = new URL(p, base).toString();
-        const r = await fetchHtml(url);
-        return !r.ok && r.status >= 400 ? `${url} (${r.status})` : null;
-      })
-    );
-    brokenLinks.push(...probeResults.filter((r): r is string => r !== null));
-  }
-
-  diagnostics["tech-1"] = brokenLinks;
-  statuses["tech-1"] = brokenLinks.length === 0 ? "done" : "todo";
-
-  const homeLower = home.html.toLowerCase();
-  const aboutLower = about.html.toLowerCase();
-
-  statuses["eeat-4"] = homeLower.includes("affiliate") ? "done" : "todo";
-  statuses["eeat-5"] = homeLower.includes("last updated") ? "done" : "todo";
-
-  const hasTeamSignals =
-    aboutLower.includes("editorial") ||
-    aboutLower.includes("our team") ||
-    aboutLower.includes("mission") ||
-    aboutLower.includes("about us");
-  statuses["eeat-3"] = hasTeamSignals ? "done" : "todo";
-
-  const hasLdJson = homeLower.includes("application/ld+json");
-  const hasReviewSchema = homeLower.includes("\"@type\":\"review\"") || homeLower.includes("\"@type\":\"softwareapplication\"");
-  const hasFaqSchema = homeLower.includes("\"@type\":\"faqpage\"");
-
-  statuses["tech-4"] = hasLdJson && hasReviewSchema ? "done" : "todo";
-  statuses["tech-5"] = hasLdJson && hasFaqSchema ? "done" : "todo";
-
-  if (home.ok) {
-    const underlinkedCandidates = await collectUnderlinkedPages(base, home.html);
-    diagnostics["links-1"] = underlinkedCandidates;
-    statuses["links-1"] = underlinkedCandidates.length === 0 ? "done" : "todo";
-  }
-
+  // Run crawl/sitemap diagnostics before fetch-heavy checks to avoid Worker subrequest limits.
   const sitemapAudit = await fetchSitemapAudit(base);
   const sitemapEntries = sitemapAudit.entries;
 
@@ -624,6 +590,70 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
 
   diagnostics["crawl-2"] = crawlSignalConflicts.slice(0, 10);
   statuses["crawl-2"] = crawlSignalConflicts.length === 0 ? "done" : "todo";
+
+  if (!home.ok) {
+    notes.push(`Home page fetch failed with status ${home.status || "network-error"}.`);
+  }
+
+  const methodologyPaths = [
+    "/our-review-methodology/",
+    "/review-methodology/",
+    "/methodology/",
+    "/how-we-review/",
+    "/how-we-test/",
+    "/editorial-process/",
+  ];
+  let methodologyFound: string | null = null;
+  for (const mp of methodologyPaths) {
+    const r = await fetchHtml(`${base}${mp}`);
+    if (r.ok) {
+      methodologyFound = mp;
+      break;
+    }
+  }
+  statuses["eeat-2"] = methodologyFound ? "done" : "todo";
+
+  const brokenLinks: string[] = [];
+  if (home.ok) {
+    const internalPaths = extractInternalPaths(home.html, base).slice(0, 30);
+    const probeResults = await Promise.all(
+      internalPaths.map(async (p) => {
+        const url = new URL(p, base).toString();
+        const r = await fetchHtml(url);
+        return !r.ok && r.status >= 400 ? `${url} (${r.status})` : null;
+      })
+    );
+    brokenLinks.push(...probeResults.filter((r): r is string => r !== null));
+  }
+
+  diagnostics["tech-1"] = brokenLinks;
+  statuses["tech-1"] = brokenLinks.length === 0 ? "done" : "todo";
+
+  const homeLower = home.html.toLowerCase();
+  const aboutLower = about.html.toLowerCase();
+
+  statuses["eeat-4"] = homeLower.includes("affiliate") ? "done" : "todo";
+  statuses["eeat-5"] = homeLower.includes("last updated") ? "done" : "todo";
+
+  const hasTeamSignals =
+    aboutLower.includes("editorial") ||
+    aboutLower.includes("our team") ||
+    aboutLower.includes("mission") ||
+    aboutLower.includes("about us");
+  statuses["eeat-3"] = hasTeamSignals ? "done" : "todo";
+
+  const hasLdJson = homeLower.includes("application/ld+json");
+  const hasReviewSchema = homeLower.includes("\"@type\":\"review\"") || homeLower.includes("\"@type\":\"softwareapplication\"");
+  const hasFaqSchema = homeLower.includes("\"@type\":\"faqpage\"");
+
+  statuses["tech-4"] = hasLdJson && hasReviewSchema ? "done" : "todo";
+  statuses["tech-5"] = hasLdJson && hasFaqSchema ? "done" : "todo";
+
+  if (home.ok) {
+    const underlinkedCandidates = await collectUnderlinkedPages(base, home.html);
+    diagnostics["links-1"] = underlinkedCandidates;
+    statuses["links-1"] = underlinkedCandidates.length === 0 ? "done" : "todo";
+  }
 
   if (sitemapEntries.length > 0) {
     const staleEntries = sitemapEntries
