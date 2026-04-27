@@ -405,14 +405,8 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
 
       if (data.statuses) {
         let resolvedStatuses: Record<string, Status> | null = null;
-        setStatuses(() => {
-          const baseline: Record<string, Status> = {};
-          for (const category of categories) {
-            for (const item of category.items) {
-              baseline[item.id] = "done";
-            }
-          }
-          resolvedStatuses = { ...baseline, ...data.statuses };
+        setStatuses((prev) => {
+          resolvedStatuses = { ...prev, ...data.statuses };
           return resolvedStatuses;
         });
 
