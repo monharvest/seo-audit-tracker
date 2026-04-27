@@ -31,8 +31,8 @@ export interface Category {
 }
 
 export const auditMeta = {
-  site: "",
-  niche: "",
+  site: "onelesshour.com",
+  niche: "AI tools and productivity",
   auditDate: "—",
   auditor: "SEO Audit Tracker",
   executiveSummary:

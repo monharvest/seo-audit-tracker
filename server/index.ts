@@ -29,7 +29,12 @@ async function startServer() {
       const site =
         typeof req.body?.site === "string" && req.body.site.trim()
           ? req.body.site.trim()
-          : "example.com";
+          : "";
+      if (!site) {
+        res.status(400).json({ error: "Missing site" });
+        return;
+      }
+
       const result = await runAutomatedRetest(site, env);
       res.json(result);
     } catch (e) {

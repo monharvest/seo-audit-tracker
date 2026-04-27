@@ -370,6 +370,12 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
   const runRetest = useCallback(async (siteOverride?: string) => {
     if (isRetesting) return;
     const site = siteOverride ? normalizeSiteInput(siteOverride) : targetSite;
+    if (!site.trim()) {
+      setRetestNotes(["Enter a website domain before running a retest."]);
+      setItemDiagnostics({});
+      setRetestProgress(0);
+      return;
+    }
     setIsRetesting(true);
     setRetestProgress(5);
     setRetestNotes([]);

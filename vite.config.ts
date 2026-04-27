@@ -143,6 +143,9 @@ function looksLikeContentPage(urlValue: string, base: string): boolean {
         "review-methodology",
         "methodology",
         "sitemap",
+        "wp-json",
+        "wp-content",
+        "xmlrpc.php",
       ].includes(slug)
     ) {
       return false;
@@ -983,7 +986,13 @@ function vitePluginApiServer(): Plugin {
         }
 
         const handleRequest = async (payload: { site?: string }) => {
-          const site = typeof payload?.site === "string" && payload.site.trim() ? payload.site.trim() : "example.com";
+          const site = typeof payload?.site === "string" && payload.site.trim() ? payload.site.trim() : "";
+          if (!site) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Missing site" }));
+            return;
+          }
+
           const result = await runAutomatedRetest(site);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(result));

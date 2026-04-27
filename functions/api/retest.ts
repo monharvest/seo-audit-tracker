@@ -3,7 +3,14 @@ import { runAutomatedRetest, type WorkerEnv } from "./_shared";
 export const onRequestPost: PagesFunction<WorkerEnv> = async ({ request, env }) => {
   try {
     const payload = (await request.json()) as { site?: string };
-    const site = typeof payload?.site === "string" && payload.site.trim() ? payload.site.trim() : "example.com";
+    const site = typeof payload?.site === "string" ? payload.site.trim() : "";
+    if (!site) {
+      return new Response(JSON.stringify({ error: "Missing site" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     const result = await runAutomatedRetest(site, env);
 
     return new Response(JSON.stringify(result), {

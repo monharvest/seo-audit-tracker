@@ -369,6 +369,9 @@ function looksLikeContentPage(urlValue: string, base: string): boolean {
         "review-methodology",
         "methodology",
         "sitemap",
+        "wp-json",
+        "wp-content",
+        "xmlrpc.php",
       ].includes(slug)
     ) {
       return false;
