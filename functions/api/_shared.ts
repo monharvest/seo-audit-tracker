@@ -454,20 +454,22 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
   const notes: string[] = [];
   const statuses: Record<string, AuditStatus> = {};
   const diagnostics: Record<string, string[]> = {};
+  const hasPageSpeedKey = Boolean(env.PAGE_SPEED_API_KEY?.trim());
 
   const [home, about] = await Promise.all([
     fetchHtml(base),
     fetchHtml(`${base}/about`),
   ]);
 
-  const psiResults = await Promise.all([
-    fetchPageSpeed(base, "mobile", env),
-    fetchPageSpeed(base, "desktop", env),
-  ]);
+  const psiResults = hasPageSpeedKey
+    ? await Promise.all([
+        fetchPageSpeed(base, "mobile", env),
+        fetchPageSpeed(base, "desktop", env),
+      ])
+    : [];
 
   const psiOk = psiResults.filter((r) => r.ok && r.data).map((r) => r.data as PageSpeedResult);
   const psiErrors = psiResults.filter((r) => !r.ok).map((r) => r.error ?? "Unknown PSI error");
-  const hasPageSpeedKey = Boolean(env.PAGE_SPEED_API_KEY);
 
   if (psiOk.length > 0) {
     const cwvIssues: string[] = [];

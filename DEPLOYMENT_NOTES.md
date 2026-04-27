@@ -27,3 +27,9 @@ Last updated: 2026-04-05
 ## Recommended Deploy Command
 
 - `pnpm build:cf && pnpm deploy:cf`
+
+## PageSpeed Secret Requirement
+
+- Automated retest PageSpeed checks are secret-backed and require `PAGE_SPEED_API_KEY`.
+- Configure `PAGE_SPEED_API_KEY` in Cloudflare Pages for both `Preview` and `Production` environments.
+- If the key is missing, Core Web Vitals checks remain `in-progress` and diagnostics explain that the key is not configured.
