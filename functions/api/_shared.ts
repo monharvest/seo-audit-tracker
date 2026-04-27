@@ -30,6 +30,11 @@ interface CompetitorSnapshot {
   sampleH2: string;
 }
 
+interface AuditPageSample {
+  url: string;
+  html: string;
+}
+
 interface CompetitorBaseline {
   [url: string]: CompetitorSnapshot;
 }
@@ -347,6 +352,96 @@ async function collectUnderlinkedPages(base: string, seedHtml: string): Promise<
     .map(([pathValue, count]) => `${new URL(pathValue, base).toString()} (internal links: ${count})`);
 }
 
+function looksLikeContentPage(urlValue: string, base: string): boolean {
+  try {
+    const parsed = new URL(urlValue, base);
+    const pathParts = parsed.pathname.split("/").filter(Boolean);
+    if (pathParts.length !== 1) return false;
+
+    const slug = pathParts[0].toLowerCase();
+    if (
+      [
+        "about",
+        "blog",
+        "contact",
+        "disclaimer",
+        "privacy-policy",
+        "review-methodology",
+        "methodology",
+        "sitemap",
+      ].includes(slug)
+    ) {
+      return false;
+    }
+
+    return slug.includes("-") || slug.startsWith("best-");
+  } catch {
+    return false;
+  }
+}
+
+function looksLikeReviewPage(sample: AuditPageSample): boolean {
+  try {
+    const slug = new URL(sample.url).pathname.split("/").filter(Boolean)[0]?.toLowerCase() ?? "";
+    const lower = sample.html.toLowerCase();
+    return slug.startsWith("best-") || slug.includes("review") || lower.includes("review");
+  } catch {
+    return false;
+  }
+}
+
+async function collectAuditPageSamples(
+  base: string,
+  home: { ok: boolean; html: string },
+  sitemapEntries: Array<{ url: string; lastmod: string | null }> = []
+): Promise<AuditPageSample[]> {
+  const candidates = new Set<string>();
+
+  for (const entry of sitemapEntries) {
+    if (looksLikeContentPage(entry.url, base)) candidates.add(new URL(entry.url, base).toString());
+    if (candidates.size >= 8) break;
+  }
+
+  if (home.ok) {
+    for (const pathValue of extractInternalPaths(home.html, base)) {
+      const url = new URL(pathValue, base).toString();
+      if (looksLikeContentPage(url, base)) candidates.add(url);
+      if (candidates.size >= 8) break;
+    }
+  }
+
+  const samples: AuditPageSample[] = [];
+  for (const url of [...candidates].slice(0, 6)) {
+    const page = await fetchHtml(url);
+    if (page.ok) samples.push({ url, html: page.html });
+  }
+
+  return samples;
+}
+
+function hasSchemaType(html: string, schemaTypes: string[]): boolean {
+  return schemaTypes.some((type) => {
+    const escapedType = type.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`"@type"\\s*:\\s*"${escapedType}"`, "i").test(html);
+  });
+}
+
+function hasAffiliateDisclosure(html: string): boolean {
+  const lower = html.toLowerCase();
+  return lower.includes("affiliate") || lower.includes("commission");
+}
+
+function hasFreshnessSignal(html: string): boolean {
+  const lower = html.toLowerCase();
+  return (
+    lower.includes("last updated") ||
+    lower.includes("updated on") ||
+    lower.includes("date modified") ||
+    /"datemodified"\s*:/i.test(html) ||
+    /property=["']article:modified_time["']/i.test(html)
+  );
+}
+
 function readCompetitorBaseline(): CompetitorBaseline {
   return { ...competitorBaselineMemory };
 }
@@ -631,11 +726,32 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
   diagnostics["tech-1"] = brokenLinks;
   statuses["tech-1"] = brokenLinks.length === 0 ? "done" : "todo";
 
-  const homeLower = home.html.toLowerCase();
   const aboutLower = about.html.toLowerCase();
+  const auditPageSamples = await collectAuditPageSamples(base, home, sitemapEntries);
+  const contentPageSamples = auditPageSamples.length > 0 ? auditPageSamples : [{ url: base, html: home.html }];
+  const reviewPageSamples = contentPageSamples.filter(looksLikeReviewPage);
+  const schemaReviewSamples = reviewPageSamples.length > 0 ? reviewPageSamples : contentPageSamples;
 
-  statuses["eeat-4"] = homeLower.includes("affiliate") ? "done" : "todo";
-  statuses["eeat-5"] = homeLower.includes("last updated") ? "done" : "todo";
+  const affiliateMissing = contentPageSamples
+    .filter((page) => !hasAffiliateDisclosure(page.html))
+    .map((page) => `${page.url}: No obvious affiliate disclosure text found.`);
+
+  const freshnessMissing = contentPageSamples
+    .filter((page) => !hasFreshnessSignal(page.html))
+    .map((page) => `${page.url}: No obvious visible or structured freshness signal found.`);
+
+  const reviewSchemaMissing = schemaReviewSamples
+    .filter((page) => !hasSchemaType(page.html, ["Review", "SoftwareApplication", "Product"]))
+    .map((page) => `${page.url}: Review/SoftwareApplication/Product schema was not clearly detected.`);
+
+  const faqSchemaMissing = auditPageSamples
+    .filter((page) => !hasSchemaType(page.html, ["FAQPage"]))
+    .map((page) => `${page.url}: FAQPage schema was not clearly detected.`);
+
+  diagnostics["eeat-4"] = affiliateMissing.slice(0, 6);
+  statuses["eeat-4"] = affiliateMissing.length === 0 ? "done" : "todo";
+  diagnostics["eeat-5"] = freshnessMissing.slice(0, 6);
+  statuses["eeat-5"] = freshnessMissing.length === 0 ? "done" : "todo";
 
   const hasTeamSignals =
     aboutLower.includes("editorial") ||
@@ -644,12 +760,10 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
     aboutLower.includes("about us");
   statuses["eeat-3"] = hasTeamSignals ? "done" : "todo";
 
-  const hasLdJson = homeLower.includes("application/ld+json");
-  const hasReviewSchema = homeLower.includes("\"@type\":\"review\"") || homeLower.includes("\"@type\":\"softwareapplication\"");
-  const hasFaqSchema = homeLower.includes("\"@type\":\"faqpage\"");
-
-  statuses["tech-4"] = hasLdJson && hasReviewSchema ? "done" : "todo";
-  statuses["tech-5"] = hasLdJson && hasFaqSchema ? "done" : "todo";
+  diagnostics["tech-4"] = reviewSchemaMissing.slice(0, 6);
+  statuses["tech-4"] = reviewSchemaMissing.length === 0 ? "done" : "todo";
+  diagnostics["tech-5"] = faqSchemaMissing.slice(0, 6);
+  statuses["tech-5"] = faqSchemaMissing.length === 0 ? "done" : "todo";
 
   if (home.ok) {
     const underlinkedCandidates = await collectUnderlinkedPages(base, home.html);
