@@ -87,6 +87,7 @@ export function Sidebar({ activeCategory, onCategoryClick }: SidebarProps) {
     lastRetestAt,
     auditDateLabel,
     retestNotes,
+    health,
   } = useAudit();
   const [draftSite, setDraftSite] = useState(targetSite);
   const [email, setEmail] = useState("");
@@ -350,10 +351,38 @@ export function Sidebar({ activeCategory, onCategoryClick }: SidebarProps) {
           </p>
         )}
 
+        {health && (
+          <div className="mb-3 p-2 rounded border border-gray-200 bg-white">
+            <div className="flex items-baseline justify-between">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500">Site Health</span>
+              <span
+                className={`text-xs font-bold ${
+                  health.grade === "A" ? "text-emerald-700"
+                    : health.grade === "B" ? "text-emerald-600"
+                    : health.grade === "C" ? "text-amber-600"
+                    : health.grade === "D" ? "text-orange-600"
+                    : "text-red-700"
+                }`}
+              >
+                {health.score}/100 · {health.grade}
+              </span>
+            </div>
+            <p className="text-[10px] text-gray-600 mt-1">
+              <span className="text-red-700 font-semibold">{health.errors} errors</span>
+              {" · "}
+              <span className="text-amber-700 font-semibold">{health.warnings} warnings</span>
+              {" · "}
+              <span className="text-blue-700 font-semibold">{health.infos} info</span>
+            </p>
+          </div>
+        )}
+
         {retestNotes.length > 0 && (
-          <p className="text-[10px] text-amber-700 mb-3">
-            {retestNotes[0]}
-          </p>
+          <ul className="text-[10px] text-amber-700 mb-3 space-y-0.5 list-disc list-inside">
+            {retestNotes.slice(0, 6).map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
         )}
 
         <div className="flex items-center gap-2 mb-3">

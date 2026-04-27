@@ -1,10 +1,26 @@
 type AuditStatus = "todo" | "in-progress" | "done";
 
+export type DiagnosticSeverity = "error" | "warning" | "info";
+
+export interface Diagnostic {
+  severity: DiagnosticSeverity;
+  message: string;
+}
+
+export interface HealthScore {
+  score: number;
+  grade: "A" | "B" | "C" | "D" | "F";
+  errors: number;
+  warnings: number;
+  infos: number;
+}
+
 export interface RetestPayload {
   statuses: Record<string, AuditStatus>;
   checkedAt: string;
   notes: string[];
-  diagnostics: Record<string, string[]>;
+  diagnostics: Record<string, Diagnostic[]>;
+  health?: HealthScore;
 }
 
 interface SitemapAuditResult {
@@ -41,6 +57,10 @@ interface CompetitorBaseline {
 
 const competitorBaselineMemory: CompetitorBaseline = {};
 
+const err = (message: string): Diagnostic => ({ severity: "error", message });
+const warn = (message: string): Diagnostic => ({ severity: "warning", message });
+const info = (message: string): Diagnostic => ({ severity: "info", message });
+
 export interface WorkerEnv {
   PAGE_SPEED_API_KEY?: string;
   RESEND_API_KEY?: string;
@@ -56,8 +76,11 @@ function normalizePath(urlValue: string): string | null {
   try {
     const parsed = new URL(urlValue, "https://placeholder.local");
     const pathPart = parsed.pathname || "/";
-    const normalized = `${pathPart}${parsed.search || ""}`;
-    return normalized.endsWith("/") ? normalized : `${normalized}/`;
+    const search = parsed.search || "";
+    const lastSegment = pathPart.split("/").pop() ?? "";
+    const looksLikeFile = /\.[a-z0-9]{1,8}$/i.test(lastSegment);
+    const needsTrailingSlash = !looksLikeFile && !search && !pathPart.endsWith("/");
+    return `${pathPart}${needsTrailingSlash ? "/" : ""}${search}`;
   } catch {
     return null;
   }
@@ -315,26 +338,22 @@ async function fetchSitemapAudit(base: string): Promise<SitemapAuditResult> {
   };
 }
 
-async function collectUnderlinkedPages(base: string, seedHtml: string): Promise<string[]> {
+async function collectUnderlinkedPages(
+  base: string,
+  seedPages: Array<{ url: string; html: string }>,
+): Promise<string[]> {
   const rootPath = normalizePath(base) || "/";
-  const queue = extractInternalPaths(seedHtml, base).slice(0, 18);
-  const visited = new Set<string>([rootPath]);
+  const visited = new Set<string>();
   const inbound = new Map<string, number>();
   inbound.set(rootPath, 1);
 
-  for (const pathValue of queue) {
-    inbound.set(pathValue, (inbound.get(pathValue) ?? 0) + 1);
-  }
-
-  for (const pagePath of queue) {
-    if (visited.has(pagePath)) continue;
-    visited.add(pagePath);
-
-    const page = await fetchHtml(new URL(pagePath, base).toString());
-    if (!page.ok) continue;
-
-    const links = extractInternalPaths(page.html, base).slice(0, 25);
-    for (const targetPath of links) {
+  // Count inbound links from every seed page (homepage, /about, /contact, sample articles).
+  // Sites typically place /contact, /disclaimer, /privacy in the footer — including those
+  // pages as seeds prevents misclassifying footer-only links as orphans.
+  for (const page of seedPages) {
+    const seedPath = normalizePath(page.url) ?? rootPath;
+    visited.add(seedPath);
+    for (const targetPath of extractInternalPaths(page.html, base).slice(0, 40)) {
       inbound.set(targetPath, (inbound.get(targetPath) ?? 0) + 1);
     }
   }
@@ -343,6 +362,7 @@ async function collectUnderlinkedPages(base: string, seedHtml: string): Promise<
     .filter(([pathValue, count]) => {
       if (pathValue === rootPath || count > 1) return false;
       if (pathValue.startsWith("/wp-json")) return false;
+      if (pathValue.startsWith("/wp-admin")) return false;
       if (pathValue.includes("/feed/")) return false;
       if (pathValue.includes("?")) return false;
       return true;
@@ -443,6 +463,235 @@ function hasFreshnessSignal(html: string): boolean {
     /"datemodified"\s*:/i.test(html) ||
     /property=["']article:modified_time["']/i.test(html)
   );
+}
+
+// WordPress and Cloudflare internals that legitimately 4xx — flagging them as broken is noise.
+const BROKEN_LINK_SKIP_PATTERNS = [
+  /\/xmlrpc\.php(\?|$|\/)/i,
+  /\/wp-json(\/|$)/i,
+  /\/wp-admin(\/|$)/i,
+  /\/cdn-cgi\/l\/email-protection/i,
+];
+
+function shouldSkipBrokenLinkProbe(url: string): boolean {
+  return BROKEN_LINK_SKIP_PATTERNS.some((re) => re.test(url));
+}
+
+type LinkProbeResult =
+  | { url: string; kind: "ok"; status: number }
+  | { url: string; kind: "broken"; status: number }
+  | { url: string; kind: "redirect"; status: number; location: string };
+
+async function probeInternalLink(url: string): Promise<LinkProbeResult> {
+  try {
+    const res = await fetch(url, {
+      redirect: "manual",
+      headers: { "user-agent": "seo-audit-tracker/1.0" },
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location") ?? "";
+      return { url, kind: "redirect", status: res.status, location: loc };
+    }
+    if (res.status >= 400) {
+      return { url, kind: "broken", status: res.status };
+    }
+    return { url, kind: "ok", status: res.status };
+  } catch {
+    return { url, kind: "ok", status: 0 };
+  }
+}
+
+function extractMetaDescription(html: string): string {
+  const m =
+    html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']+)["']/i) ??
+    html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*name=["']description["']/i);
+  return (m?.[1] ?? "").trim();
+}
+
+function countH1(html: string): number {
+  return [...html.matchAll(/<h1[\s>]/gi)].length;
+}
+
+function hasAuthorByline(html: string): boolean {
+  if (/<meta[^>]+name=["']author["']/i.test(html)) return true;
+  if (/"@type"\s*:\s*"Person"/i.test(html)) return true;
+  if (/"author"\s*:\s*[\{\[]/i.test(html)) return true;
+  const visible = html.replace(/<[^>]+>/g, " ");
+  if (/\bby\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?\b/.test(visible)) return true;
+  return false;
+}
+
+const STOCK_IMAGE_DOMAINS = [
+  "images.unsplash.com",
+  "unsplash.com",
+  "images.pexels.com",
+  "pexels.com",
+  "shutterstock.com",
+  "istockphoto.com",
+  "gettyimages.com",
+  "freepik.com",
+  "depositphotos.com",
+  "stock.adobe.com",
+  "dreamstime.com",
+  "123rf.com",
+];
+
+function findStockImageUrls(html: string): string[] {
+  const out: string[] = [];
+  const matches = html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi);
+  for (const m of matches) {
+    const src = m[1];
+    if (!src) continue;
+    try {
+      const host = new URL(src, "https://placeholder.local").host.toLowerCase();
+      if (STOCK_IMAGE_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) {
+        out.push(src);
+      }
+    } catch {
+      // ignore malformed src
+    }
+  }
+  return out;
+}
+
+function countImagesMissingAlt(html: string): number {
+  let missing = 0;
+  const matches = html.matchAll(/<img\b([^>]*)>/gi);
+  for (const m of matches) {
+    const attrs = m[1] ?? "";
+    // Skip decorative images that explicitly opt out
+    if (/role=["']presentation["']/i.test(attrs)) continue;
+    if (/aria-hidden=["']true["']/i.test(attrs)) continue;
+    if (!/\balt\s*=\s*["'][^"']/i.test(attrs)) {
+      missing += 1;
+    }
+  }
+  return missing;
+}
+
+function hasQuantitativeMetrics(html: string): boolean {
+  const visible = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ");
+  // Count occurrences of measurable claims; need at least 3 to consider the page quantitative.
+  const patterns = [
+    /\b\d+\s*(?:minutes?|seconds?|hours?|hrs?|mins?|ms)\b/gi,
+    /\b(?:saved|cut|reduced)\s+(?:my\s+)?\d+/gi,
+    /\b\d+\s*x\s+(?:faster|more|less)\b/gi,
+    /\b\d+%\s+(?:faster|slower|more|less|better|improvement|increase|decrease)\b/gi,
+    /\b\$\d+(?:\.\d+)?\s*(?:\/\s*(?:mo|month|year|user))?/gi,
+  ];
+  let total = 0;
+  for (const re of patterns) {
+    total += [...visible.matchAll(re)].length;
+    if (total >= 3) return true;
+  }
+  return false;
+}
+
+function hasComparisonTable(html: string): boolean {
+  // A real comparison table has 2+ rows and 3+ columns of data.
+  const tableMatches = [...html.matchAll(/<table\b[\s\S]*?<\/table>/gi)];
+  for (const m of tableMatches) {
+    const tableHtml = m[0];
+    const rows = [...tableHtml.matchAll(/<tr\b/gi)].length;
+    const cells = [...tableHtml.matchAll(/<t[hd]\b/gi)].length;
+    if (rows >= 3 && cells >= 6) return true;
+  }
+  return false;
+}
+
+function hasFirstPersonPhrasing(html: string): boolean {
+  const visible = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ");
+  const patterns = [
+    /\bI\s+(?:tested|tried|used|reviewed|spent|measured|tracked|ran|compared|benchmarked)\b/gi,
+    /\b(?:my|our)\s+(?:results?|test(?:s|ing)?|workflow|setup|experience)\b/gi,
+    /\bafter\s+\d+\s+(?:days?|weeks?|months?|hours?)\s+of\b/gi,
+  ];
+  let total = 0;
+  for (const re of patterns) {
+    total += [...visible.matchAll(re)].length;
+    if (total >= 2) return true;
+  }
+  return false;
+}
+
+function countVisibleWords(html: string): number {
+  const visible = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+    .replace(/<header[\s\S]*?<\/header>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&[a-z]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!visible) return 0;
+  return visible.split(" ").filter((w) => /[a-zA-Z0-9]/.test(w)).length;
+}
+
+function pickArticleSampleUrl(base: string, homeHtml: string): string | null {
+  for (const path of extractInternalPaths(homeHtml, base)) {
+    const url = new URL(path, base).toString();
+    if (looksLikeContentPage(url, base)) return url;
+  }
+  return null;
+}
+
+function computeHealthScore(diagnostics: Record<string, Diagnostic[]>): HealthScore {
+  let errors = 0;
+  let warnings = 0;
+  let infos = 0;
+  for (const list of Object.values(diagnostics)) {
+    for (const d of list) {
+      if (d.severity === "error") errors += 1;
+      else if (d.severity === "warning") warnings += 1;
+      else infos += 1;
+    }
+  }
+  // Weights tuned so an errors-heavy site scores F while a warnings-only site lands around C/D.
+  const raw = 100 - errors * 10 - warnings * 2 - infos * 0.5;
+  const score = Math.max(0, Math.min(100, Math.round(raw)));
+  let grade: HealthScore["grade"];
+  if (score >= 90) grade = "A";
+  else if (score >= 80) grade = "B";
+  else if (score >= 70) grade = "C";
+  else if (score >= 60) grade = "D";
+  else grade = "F";
+  return { score, grade, errors, warnings, infos };
+}
+
+function buildSummaryNotes(
+  health: HealthScore,
+  diagnostics: Record<string, Diagnostic[]>,
+): string[] {
+  const notes: string[] = [];
+  notes.push(
+    `Site health: ${health.score}/100 (Grade ${health.grade}) — ` +
+      `${health.errors} error${health.errors === 1 ? "" : "s"}, ` +
+      `${health.warnings} warning${health.warnings === 1 ? "" : "s"}, ` +
+      `${health.infos} info`,
+  );
+
+  // Surface top categories by total findings.
+  const categoryTotals = Object.entries(diagnostics)
+    .map(([id, list]) => {
+      const errs = list.filter((d) => d.severity === "error").length;
+      const warns = list.filter((d) => d.severity === "warning").length;
+      return { id, total: list.length, errs, warns };
+    })
+    .filter((c) => c.total > 0)
+    .sort((a, b) => b.errs - a.errs || b.warns - a.warns || b.total - a.total)
+    .slice(0, 5);
+
+  for (const c of categoryTotals) {
+    const parts: string[] = [];
+    if (c.errs > 0) parts.push(`${c.errs} error${c.errs === 1 ? "" : "s"}`);
+    if (c.warns > 0) parts.push(`${c.warns} warning${c.warns === 1 ? "" : "s"}`);
+    const infosCount = c.total - c.errs - c.warns;
+    if (infosCount > 0) parts.push(`${infosCount} info`);
+    notes.push(`${c.id}: ${parts.join(", ")}`);
+  }
+  return notes;
 }
 
 function readCompetitorBaseline(): CompetitorBaseline {
@@ -551,7 +800,7 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
   const base = site.startsWith("http") ? site : `https://${site}`;
   const notes: string[] = [];
   const statuses: Record<string, AuditStatus> = {};
-  const diagnostics: Record<string, string[]> = {};
+  const diagnostics: Record<string, Diagnostic[]> = {};
   const hasPageSpeedKey = Boolean(env.PAGE_SPEED_API_KEY?.trim());
 
   const [home, about] = await Promise.all([
@@ -570,38 +819,63 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
   const psiErrors = psiResults.filter((r) => !r.ok).map((r) => r.error ?? "Unknown PSI error");
 
   if (psiOk.length > 0) {
-    const cwvIssues: string[] = [];
-    const renderIssues: string[] = [];
+    const cwvIssues: Diagnostic[] = [];
+    const renderIssues: Diagnostic[] = [];
 
     for (const r of psiOk) {
       const prefix = `[${r.strategy}]`;
-      if (r.performanceScore < 80) cwvIssues.push(`${prefix} performance score ${r.performanceScore} (target >= 80)`);
-      if (r.lcpMs != null && r.lcpMs > 2500) cwvIssues.push(`${prefix} LCP ${Math.round(r.lcpMs)}ms (target <= 2500ms)`);
-      if (r.inpMs != null && r.inpMs > 200) cwvIssues.push(`${prefix} INP ${Math.round(r.inpMs)}ms (target <= 200ms)`);
-      if (r.cls != null && r.cls > 0.1) cwvIssues.push(`${prefix} CLS ${r.cls.toFixed(3)} (target <= 0.100)`);
+      if (r.performanceScore < 80) cwvIssues.push(warn(`${prefix} performance score ${r.performanceScore} (target >= 80)`));
+      if (r.lcpMs != null && r.lcpMs > 2500) cwvIssues.push(warn(`${prefix} LCP ${Math.round(r.lcpMs)}ms (target <= 2500ms)`));
+      if (r.inpMs != null && r.inpMs > 200) cwvIssues.push(warn(`${prefix} INP ${Math.round(r.inpMs)}ms (target <= 200ms)`));
+      if (r.cls != null && r.cls > 0.1) cwvIssues.push(warn(`${prefix} CLS ${r.cls.toFixed(3)} (target <= 0.100)`));
 
       if (r.renderBlockingSavingsMs != null && r.renderBlockingSavingsMs > 200) {
-        renderIssues.push(`${prefix} render-blocking opportunity ${Math.round(r.renderBlockingSavingsMs)}ms`);
+        renderIssues.push(warn(`${prefix} render-blocking opportunity ${Math.round(r.renderBlockingSavingsMs)}ms`));
       }
       if (r.unusedJsSavingsBytes != null && r.unusedJsSavingsBytes > 50_000) {
-        renderIssues.push(`${prefix} unused JS ${Math.round(r.unusedJsSavingsBytes / 1024)}KB`);
+        renderIssues.push(warn(`${prefix} unused JS ${Math.round(r.unusedJsSavingsBytes / 1024)}KB`));
       }
       if (r.tbtMs != null && r.tbtMs > 300) {
-        renderIssues.push(`${prefix} total blocking time ${Math.round(r.tbtMs)}ms`);
+        renderIssues.push(warn(`${prefix} total blocking time ${Math.round(r.tbtMs)}ms`));
       }
     }
 
     diagnostics["perf-1"] = cwvIssues;
-    statuses["perf-1"] = cwvIssues.length === 0 ? "done" : "todo";
-    diagnostics["perf-2"] = [...renderIssues, ...psiErrors];
+    diagnostics["perf-2"] = [...renderIssues, ...psiErrors.map((e) => warn(e))];
+
+    // Per-template performance: sample one article URL on mobile so we don't only test the homepage.
+    // The audit's own copy says "CWV should be evaluated by page template" — this is that.
+    const articleSampleUrl = home.ok ? pickArticleSampleUrl(base, home.html) : null;
+    if (articleSampleUrl && articleSampleUrl !== base) {
+      const articleResult = await fetchPageSpeed(articleSampleUrl, "mobile", env);
+      if (articleResult.ok && articleResult.data) {
+        const r = articleResult.data;
+        const prefix = `[article/mobile ${articleSampleUrl}]`;
+        const homepageMobile = psiOk.find((p) => p.strategy === "mobile");
+        // Flag when article scores noticeably worse than homepage (per-template variance).
+        if (homepageMobile && homepageMobile.performanceScore - r.performanceScore >= 15) {
+          diagnostics["perf-1"].push(
+            warn(
+              `${prefix} performance score ${r.performanceScore} (homepage scored ${homepageMobile.performanceScore} — per-template variance)`,
+            ),
+          );
+        }
+        if (r.lcpMs != null && r.lcpMs > 2500) {
+          diagnostics["perf-1"].push(warn(`${prefix} LCP ${Math.round(r.lcpMs)}ms (target <= 2500ms)`));
+        }
+        if (r.cls != null && r.cls > 0.1) {
+          diagnostics["perf-1"].push(warn(`${prefix} CLS ${r.cls.toFixed(3)} (target <= 0.100)`));
+        }
+      }
+    }
+
+    statuses["perf-1"] = diagnostics["perf-1"].length === 0 ? "done" : "todo";
     statuses["perf-2"] = diagnostics["perf-2"].length === 0 ? "done" : "todo";
   } else {
-    diagnostics["perf-1"] = [
-      hasPageSpeedKey
-        ? "PageSpeed Insights data is currently unavailable for this site."
-        : "PageSpeed API key is not configured. Core Web Vitals checks are marked in-progress.",
-      ...psiErrors,
-    ];
+    const message = hasPageSpeedKey
+      ? "PageSpeed Insights data is currently unavailable for this site."
+      : "PageSpeed API key is not configured. Core Web Vitals checks are marked in-progress.";
+    diagnostics["perf-1"] = [info(message), ...psiErrors.map((e) => warn(e))];
     diagnostics["perf-2"] = [...diagnostics["perf-1"]];
     statuses["perf-1"] = "in-progress";
     statuses["perf-2"] = "in-progress";
@@ -611,9 +885,9 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
   const sitemapAudit = await fetchSitemapAudit(base);
   const sitemapEntries = sitemapAudit.entries;
 
-  const crawlCoverageIssues: string[] = [];
+  const crawlCoverageIssues: Diagnostic[] = [];
   if (sitemapEntries.length === 0) {
-    crawlCoverageIssues.push("No parseable sitemap entries found at common sitemap paths or robots.txt Sitemap directives.");
+    crawlCoverageIssues.push(err("No parseable sitemap entries found at common sitemap paths or robots.txt Sitemap directives."));
   } else {
     const host = new URL(base).host;
     const staleCount = sitemapEntries
@@ -629,18 +903,18 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
     }).length;
 
     if (externalEntries > 0) {
-      crawlCoverageIssues.push(`${externalEntries} sitemap URL(s) point to a different host.`);
+      crawlCoverageIssues.push(warn(`${externalEntries} sitemap URL(s) point to a different host.`));
     }
     if (staleCount > Math.max(3, Math.floor(sitemapEntries.length * 0.35))) {
-      crawlCoverageIssues.push(`${staleCount}/${sitemapEntries.length} sitemap URLs look stale (lastmod older than 180 days).`);
+      crawlCoverageIssues.push(warn(`${staleCount}/${sitemapEntries.length} sitemap URLs look stale (lastmod older than 180 days).`));
     }
   }
-  crawlCoverageIssues.push(...sitemapAudit.duplicateUrls);
-  crawlCoverageIssues.push(...sitemapAudit.sitemapWarnings);
+  crawlCoverageIssues.push(...sitemapAudit.duplicateUrls.map((m) => warn(m)));
+  crawlCoverageIssues.push(...sitemapAudit.sitemapWarnings.map((m) => warn(m)));
   diagnostics["crawl-1"] = crawlCoverageIssues;
   statuses["crawl-1"] = crawlCoverageIssues.length === 0 ? "done" : "todo";
 
-  const crawlSignalConflicts: string[] = [];
+  const crawlSignalConflicts: Diagnostic[] = [];
   const robots = await fetchHtml(`${base}/robots.txt`);
   const disallowRules = robots.ok
     ? robots.html
@@ -657,12 +931,12 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
     try {
       parsedUrl = new URL(entry.url);
     } catch {
-      crawlSignalConflicts.push(`Invalid sitemap URL: ${entry.url}`);
+      crawlSignalConflicts.push(err(`Invalid sitemap URL: ${entry.url}`));
       continue;
     }
 
     if (isPathDisallowed(parsedUrl.pathname, disallowRules)) {
-      crawlSignalConflicts.push(`${entry.url} is listed in sitemap but blocked by robots.txt`);
+      crawlSignalConflicts.push(err(`${entry.url} is listed in sitemap but blocked by robots.txt`));
       continue;
     }
 
@@ -671,7 +945,7 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
 
     const robotsMeta = extractMetaRobots(page.html);
     if (robotsMeta.includes("noindex")) {
-      crawlSignalConflicts.push(`${entry.url} has meta robots noindex but is present in sitemap`);
+      crawlSignalConflicts.push(err(`${entry.url} has meta robots noindex but is present in sitemap`));
     }
 
     const canonical = extractCanonicalHref(page.html);
@@ -680,10 +954,10 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
         const normalizedCanonical = new URL(canonical, entry.url).toString();
         const normalizedSelf = new URL(entry.url).toString();
         if (normalizedCanonical !== normalizedSelf) {
-          crawlSignalConflicts.push(`${entry.url} canonical points to ${normalizedCanonical}`);
+          crawlSignalConflicts.push(warn(`${entry.url} canonical points to ${normalizedCanonical}`));
         }
       } catch {
-        crawlSignalConflicts.push(`${entry.url} has invalid canonical URL (${canonical})`);
+        crawlSignalConflicts.push(warn(`${entry.url} has invalid canonical URL (${canonical})`));
       }
     }
   }
@@ -713,21 +987,29 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
   }
   statuses["eeat-2"] = methodologyFound ? "done" : "todo";
 
-  const brokenLinks: string[] = [];
+  const brokenLinks: Diagnostic[] = [];
+  const redirectIssues: Diagnostic[] = [];
   if (home.ok) {
-    const internalPaths = extractInternalPaths(home.html, base).slice(0, 30);
-    const probeResults = await Promise.all(
-      internalPaths.map(async (p) => {
-        const url = new URL(p, base).toString();
-        const r = await fetchHtml(url);
-        return !r.ok && r.status >= 400 ? `${url} (${r.status})` : null;
-      })
-    );
-    brokenLinks.push(...probeResults.filter((r): r is string => r !== null));
+    const probeUrls = extractInternalPaths(home.html, base)
+      .map((p) => new URL(p, base).toString())
+      .filter((url) => !shouldSkipBrokenLinkProbe(url))
+      .slice(0, 30);
+
+    const probeResults = await Promise.all(probeUrls.map((url) => probeInternalLink(url)));
+
+    for (const r of probeResults) {
+      if (r.kind === "broken") {
+        brokenLinks.push(err(`${r.url} (${r.status})`));
+      } else if (r.kind === "redirect") {
+        redirectIssues.push(warn(`${r.url} → ${r.location} (${r.status})`));
+      }
+    }
   }
 
   diagnostics["tech-1"] = brokenLinks;
   statuses["tech-1"] = brokenLinks.length === 0 ? "done" : "todo";
+  diagnostics["tech-2"] = redirectIssues.slice(0, 10);
+  statuses["tech-2"] = redirectIssues.length === 0 ? "done" : "todo";
 
   const aboutLower = about.html.toLowerCase();
   const auditPageSamples = await collectAuditPageSamples(base, home, sitemapEntries);
@@ -737,19 +1019,19 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
 
   const affiliateMissing = contentPageSamples
     .filter((page) => !hasAffiliateDisclosure(page.html))
-    .map((page) => `${page.url}: No obvious affiliate disclosure text found.`);
+    .map((page) => warn(`${page.url}: No obvious affiliate disclosure text found.`));
 
   const freshnessMissing = contentPageSamples
     .filter((page) => !hasFreshnessSignal(page.html))
-    .map((page) => `${page.url}: No obvious visible or structured freshness signal found.`);
+    .map((page) => warn(`${page.url}: No obvious visible or structured freshness signal found.`));
 
   const reviewSchemaMissing = schemaReviewSamples
     .filter((page) => !hasSchemaType(page.html, ["Review", "SoftwareApplication", "Product"]))
-    .map((page) => `${page.url}: Review/SoftwareApplication/Product schema was not clearly detected.`);
+    .map((page) => warn(`${page.url}: Review/SoftwareApplication/Product schema was not clearly detected.`));
 
   const faqSchemaMissing = auditPageSamples
     .filter((page) => !hasSchemaType(page.html, ["FAQPage"]))
-    .map((page) => `${page.url}: FAQPage schema was not clearly detected.`);
+    .map((page) => info(`${page.url}: FAQPage schema was not clearly detected.`));
 
   diagnostics["eeat-4"] = affiliateMissing.slice(0, 6);
   statuses["eeat-4"] = affiliateMissing.length === 0 ? "done" : "todo";
@@ -768,9 +1050,170 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
   diagnostics["tech-5"] = faqSchemaMissing.slice(0, 6);
   statuses["tech-5"] = faqSchemaMissing.length === 0 ? "done" : "todo";
 
+  // tech-3: probe links inside already-fetched content pages for 4xx/5xx.
+  // Capped at 3 pages × 8 links to stay within Cloudflare's 50-subrequest budget.
+  const articleBroken: Diagnostic[] = [];
+  if (contentPageSamples.length > 0) {
+    const pagesToScan = contentPageSamples.slice(0, 3);
+    for (const page of pagesToScan) {
+      const links = extractInternalPaths(page.html, base)
+        .map((p) => new URL(p, base).toString())
+        .filter((url) => !shouldSkipBrokenLinkProbe(url) && url !== page.url)
+        .slice(0, 8);
+      const probes = await Promise.all(links.map((url) => probeInternalLink(url)));
+      for (const r of probes) {
+        if (r.kind === "broken") {
+          articleBroken.push(err(`${r.url} (${r.status}, found on ${page.url})`));
+        }
+      }
+    }
+  }
+  diagnostics["tech-3"] = articleBroken.slice(0, 8);
+  statuses["tech-3"] = articleBroken.length === 0 ? "done" : "todo";
+
+  // Static SEO checks on already-fetched HTML — zero new fetches.
+  // Dedupe by URL since contentPageSamples can fall back to [home] on small sites.
+  const staticAuditTargets: AuditPageSample[] = (() => {
+    const seen = new Set<string>();
+    const out: AuditPageSample[] = [];
+    const candidates = home.ok
+      ? [{ url: base, html: home.html }, ...contentPageSamples]
+      : [...contentPageSamples];
+    for (const page of candidates) {
+      if (seen.has(page.url)) continue;
+      seen.add(page.url);
+      out.push(page);
+    }
+    return out;
+  })();
+
+  // serp-1: title length and uniqueness across crawled pages.
+  const titleIssues: Diagnostic[] = [];
+  const titleByText = new Map<string, string[]>();
+  for (const page of staticAuditTargets) {
+    const title = extractTag(page.html, "title");
+    if (!title) {
+      titleIssues.push(err(`${page.url}: missing <title> tag`));
+      continue;
+    }
+    if (title.length < 30) {
+      titleIssues.push(warn(`${page.url}: title too short (${title.length} chars) — "${title}"`));
+    } else if (title.length > 65) {
+      titleIssues.push(warn(`${page.url}: title too long (${title.length} chars) — "${title.slice(0, 70)}…"`));
+    }
+    const list = titleByText.get(title) ?? [];
+    list.push(page.url);
+    titleByText.set(title, list);
+  }
+  for (const [title, urls] of titleByText) {
+    if (urls.length > 1) {
+      titleIssues.push(err(`Duplicate title "${title}" used on ${urls.length} pages: ${urls.join(", ")}`));
+    }
+  }
+  diagnostics["serp-1"] = titleIssues.slice(0, 8);
+  statuses["serp-1"] = titleIssues.length === 0 ? "done" : "todo";
+
+  // onpage-4: title formatting (capitalization).
+  const titleCapIssues: Diagnostic[] = [];
+  for (const page of staticAuditTargets) {
+    const title = extractTag(page.html, "title");
+    if (!title) continue;
+    const firstWord = title.split(/[\s\-|–—:]+/)[0] ?? "";
+    if (firstWord && firstWord[0] && firstWord[0] !== firstWord[0].toUpperCase()) {
+      titleCapIssues.push(info(`${page.url}: title starts with lowercase — "${title}"`));
+    }
+  }
+  diagnostics["onpage-4"] = titleCapIssues.slice(0, 8);
+  statuses["onpage-4"] = titleCapIssues.length === 0 ? "done" : "todo";
+
+  // onpage-2: meta description length.
+  const metaDescIssues: Diagnostic[] = [];
+  for (const page of staticAuditTargets) {
+    const desc = extractMetaDescription(page.html);
+    if (!desc) {
+      metaDescIssues.push(err(`${page.url}: missing meta description`));
+      continue;
+    }
+    if (desc.length < 120) {
+      metaDescIssues.push(warn(`${page.url}: description too short (${desc.length} chars)`));
+    } else if (desc.length > 160) {
+      metaDescIssues.push(warn(`${page.url}: description too long (${desc.length} chars) — Google truncates`));
+    }
+  }
+  diagnostics["onpage-2"] = metaDescIssues.slice(0, 8);
+  statuses["onpage-2"] = metaDescIssues.length === 0 ? "done" : "todo";
+
+  // onpage-3: H1 count (should be exactly 1 per page).
+  const h1Issues: Diagnostic[] = [];
+  for (const page of staticAuditTargets) {
+    const count = countH1(page.html);
+    if (count === 0) {
+      h1Issues.push(err(`${page.url}: no H1 tag`));
+    } else if (count > 1) {
+      h1Issues.push(warn(`${page.url}: ${count} H1 tags (should be exactly 1)`));
+    }
+  }
+  diagnostics["onpage-3"] = h1Issues.slice(0, 8);
+  statuses["onpage-3"] = h1Issues.length === 0 ? "done" : "todo";
+
+  // eeat-1: author byline / Person schema on content pages.
+  const bylineMissing = contentPageSamples
+    .filter((page) => !hasAuthorByline(page.html))
+    .map((page) => warn(`${page.url}: no author byline, meta author, or Person schema detected`));
+  diagnostics["eeat-1"] = bylineMissing.slice(0, 6);
+  statuses["eeat-1"] = bylineMissing.length === 0 ? "done" : "todo";
+
+  // content-1: stock photo / missing alt text detection on content pages.
+  const imageIssues: Diagnostic[] = [];
+  for (const page of contentPageSamples) {
+    const stock = findStockImageUrls(page.html);
+    if (stock.length > 0) {
+      imageIssues.push(warn(`${page.url}: ${stock.length} stock/AI-generated image(s) — first: ${stock[0]}`));
+    }
+    const missingAlt = countImagesMissingAlt(page.html);
+    if (missingAlt > 0) {
+      imageIssues.push(warn(`${page.url}: ${missingAlt} image(s) missing alt text`));
+    }
+  }
+  diagnostics["content-1"] = imageIssues.slice(0, 8);
+  statuses["content-1"] = imageIssues.length === 0 ? "done" : "todo";
+
+  // content-2: quantitative metrics ("X minutes", "saved Y hours", numeric tables).
+  const quantMissing = contentPageSamples
+    .filter((page) => !hasQuantitativeMetrics(page.html))
+    .map((page) => info(`${page.url}: no clear quantitative metrics (timed benchmarks, comparison numbers)`));
+  diagnostics["content-2"] = quantMissing.slice(0, 6);
+  statuses["content-2"] = quantMissing.length === 0 ? "done" : "todo";
+
+  // content-4: comparison table presence on listicle/review pages.
+  const tableMissing = reviewPageSamples
+    .filter((page) => !hasComparisonTable(page.html))
+    .map((page) => info(`${page.url}: no <table> element detected — listicles benefit from side-by-side comparisons`));
+  diagnostics["content-4"] = tableMissing.slice(0, 6);
+  statuses["content-4"] = tableMissing.length === 0 ? "done" : "todo";
+
+  // content-5: first-person experience phrasing ("I tested", "I used", "my").
+  const firstPersonMissing = contentPageSamples
+    .filter((page) => !hasFirstPersonPhrasing(page.html))
+    .map((page) => warn(`${page.url}: no first-person testing language ("I tested", "I used", etc.)`));
+  diagnostics["content-5"] = firstPersonMissing.slice(0, 6);
+  statuses["content-5"] = firstPersonMissing.length === 0 ? "done" : "todo";
+
+  // scale-2: thin content (under 800 words on content pages).
+  const thinPages: Diagnostic[] = [];
+  for (const page of contentPageSamples) {
+    const wc = countVisibleWords(page.html);
+    if (wc < 800) {
+      thinPages.push(warn(`${page.url}: ${wc} words — Google rewards depth on review/guide pages`));
+    }
+  }
+  diagnostics["scale-2"] = thinPages.slice(0, 8);
+  statuses["scale-2"] = thinPages.length === 0 ? "done" : "todo";
+
   if (home.ok) {
-    const underlinkedCandidates = await collectUnderlinkedPages(base, home.html);
-    diagnostics["links-1"] = underlinkedCandidates;
+    const underlinkSeed: AuditPageSample[] = [{ url: base, html: home.html }, ...contentPageSamples];
+    const underlinkedCandidates = await collectUnderlinkedPages(base, underlinkSeed);
+    diagnostics["links-1"] = underlinkedCandidates.map((m) => info(m));
     statuses["links-1"] = underlinkedCandidates.length === 0 ? "done" : "todo";
   }
 
@@ -789,12 +1232,12 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
       .filter((entry) => entry.ageDays >= 180)
       .sort((a, b) => b.ageDays - a.ageDays)
       .slice(0, 8)
-      .map((entry) => `${entry.url} (last updated ${entry.ageDays}d ago, decay score ${entry.decayScore})`);
+      .map((entry) => info(`${entry.url} (last updated ${entry.ageDays}d ago, decay score ${entry.decayScore})`));
 
     diagnostics["future-2"] = staleEntries;
     statuses["future-2"] = staleEntries.length === 0 ? "done" : "todo";
   } else {
-    diagnostics["future-2"] = ["No sitemap URL entries could be parsed for decay scoring."];
+    diagnostics["future-2"] = [info("No sitemap URL entries could be parsed for decay scoring.")];
     statuses["future-2"] = "todo";
   }
 
@@ -807,13 +1250,13 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
     ];
     const previousBaseline = readCompetitorBaseline();
     const nextBaseline: CompetitorBaseline = { ...previousBaseline };
-    const competitorFindings: string[] = [];
+    const competitorFindings: Diagnostic[] = [];
     let changeCount = 0;
 
     for (const target of competitorTargets) {
       const page = await fetchHtml(target);
       if (!page.ok) {
-        competitorFindings.push(`${target} (unreachable: ${page.status || "network-error"})`);
+        competitorFindings.push(warn(`${target} (unreachable: ${page.status || "network-error"})`));
         continue;
       }
 
@@ -825,7 +1268,7 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
 
       const prev = previousBaseline[target];
       if (!prev) {
-        competitorFindings.push(`${target} (baseline created)`);
+        competitorFindings.push(info(`${target} (baseline created)`));
       } else {
         const changedFields: string[] = [];
         if (prev.title !== snapshot.title) changedFields.push("title");
@@ -834,7 +1277,7 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
 
         if (changedFields.length > 0) {
           changeCount += 1;
-          competitorFindings.push(`${target} (changed: ${changedFields.join(", ")})`);
+          competitorFindings.push(info(`${target} (changed: ${changedFields.join(", ")})`));
         }
       }
 
@@ -849,10 +1292,17 @@ export async function runAutomatedRetest(site: string, env: WorkerEnv): Promise<
     diagnostics["future-4"] = [];
   }
 
+  // Compute overall site health score from all collected diagnostics.
+  const health = computeHealthScore(diagnostics);
+  // Top-level retest summary: health grade plus the most-impactful findings.
+  const summaryNotes = buildSummaryNotes(health, diagnostics);
+  notes.push(...summaryNotes);
+
   return {
     statuses,
     checkedAt: new Date().toISOString(),
     notes,
     diagnostics,
+    health,
   };
 }

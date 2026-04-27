@@ -593,88 +593,6 @@ export const categories: Category[] = [
     ],
   },
   {
-    id: "workflow",
-    title: "Prioritization & Workflow",
-    subtitle: "Impact · Effort · Confidence · SLA",
-    icon: "ClipboardList",
-    items: [
-      {
-        id: "wf-1",
-        categoryId: "workflow",
-        title: "Assign owner and due date for each item",
-        description:
-          "Execution speed improves when every issue has ownership and due date.",
-        detail:
-          "Ensure every checklist item has owner, due date, and SLA target. Review open items weekly and escalate overdue high-priority tasks.",
-        priority: "high",
-        impact: "Converts audits from static reports into execution systems.",
-        status: "todo",
-        effort: 1,
-        confidence: 5,
-        owner: "PM",
-        dueDate: "2026-04-10",
-        slaDays: 14,
-      },
-      {
-        id: "wf-2",
-        categoryId: "workflow",
-        title: "Adopt weighted progress scoring",
-        description:
-          "Task-count progress hides real business impact.",
-        detail:
-          "Calculate weighted progress using Impact x Confidence / Effort so high-value fixes contribute more than low-impact tasks.",
-        priority: "medium",
-        impact: "Aligns status reporting with SEO and traffic outcomes.",
-        status: "todo",
-        effort: 2,
-        confidence: 4,
-        owner: "Analytics",
-        dueDate: "2026-04-20",
-      },
-    ],
-  },
-  {
-    id: "evidence",
-    title: "Evidence & Reproducibility",
-    subtitle: "Proof Links · Before/After · Diff Reports",
-    icon: "Files",
-    items: [
-      {
-        id: "ev-1",
-        categoryId: "evidence",
-        title: "Attach proof URLs/screenshots to each fix",
-        description:
-          "Every completed issue should include evidence for validation and audit trail.",
-        detail:
-          "For each done item, include links to screenshots, crawl exports, Search Console graphs, or schema test outputs.",
-        priority: "medium",
-        impact: "Prevents subjective completion and enables reliable QA.",
-        status: "todo",
-        effort: 2,
-        confidence: 5,
-        owner: "QA",
-        dueDate: "2026-04-25",
-        evidence: ["https://search.google.com/test/rich-results"],
-      },
-      {
-        id: "ev-2",
-        categoryId: "evidence",
-        title: "Generate fixed/regressed/unchanged retest diffs",
-        description:
-          "Retest should show what actually changed since previous run.",
-        detail:
-          "Persist previous retest snapshot and compute diffs by item status and metrics. Export a compact changelog in JSON and Markdown.",
-        priority: "medium",
-        impact: "Makes retesting actionable and transparent for stakeholders.",
-        status: "todo",
-        effort: 3,
-        confidence: 4,
-        owner: "Engineering",
-        dueDate: "2026-05-02",
-      },
-    ],
-  },
-  {
     id: "integrations",
     title: "Data Integrations & Automation",
     subtitle: "GSC · GA4 · PSI · Backlink APIs",
@@ -717,25 +635,9 @@ export const categories: Category[] = [
   {
     id: "future-quality",
     title: "Future Site & Content Quality",
-    subtitle: "Coverage · Decay · QA · Experiments · Governance",
+    subtitle: "Decay · Competitive Monitoring",
     icon: "ClipboardList",
     items: [
-      {
-        id: "future-1",
-        categoryId: "future-quality",
-        title: "Build funnel-stage topical coverage map",
-        description:
-          "Map topics by TOFU/MOFU/BOFU to avoid overproducing one intent class.",
-        detail:
-          "Create a matrix of all target topics and assign each URL to awareness, consideration, or conversion intent. Flag empty clusters and overrepresented clusters.",
-        priority: "high",
-        impact: "Balances content portfolio and improves revenue-aligned organic growth.",
-        status: "todo",
-        effort: 3,
-        confidence: 5,
-        owner: "SEO Strategy",
-        dueDate: "2026-05-18",
-      },
       {
         id: "future-2",
         categoryId: "future-quality",
@@ -753,22 +655,6 @@ export const categories: Category[] = [
         dueDate: "2026-05-22",
       },
       {
-        id: "future-3",
-        categoryId: "future-quality",
-        title: "Add programmatic pre-publish editorial QA",
-        description:
-          "Enforce quality gates before content is published.",
-        detail:
-          "Validate required blocks automatically: intent-aligned title/H2s, schema presence, first-hand evidence, disclosure, internal links, FAQ, and CTA consistency.",
-        priority: "high",
-        impact: "Improves baseline quality and reduces rework after publication.",
-        status: "todo",
-        effort: 4,
-        confidence: 5,
-        owner: "Editorial Ops",
-        dueDate: "2026-05-25",
-      },
-      {
         id: "future-4",
         categoryId: "future-quality",
         title: "Set competitor page-change monitoring (optional)",
@@ -783,102 +669,6 @@ export const categories: Category[] = [
         confidence: 4,
         owner: "Competitive Intel",
         dueDate: "2026-05-28",
-      },
-      {
-        id: "future-5",
-        categoryId: "future-quality",
-        title: "Create reusable EEAT proof library",
-        description:
-          "Standardize trust components for consistent quality signals.",
-        detail:
-          "Build reusable modules for author credentials, testing methodology snippets, citations, and evidence blocks to reuse across templates.",
-        priority: "medium",
-        impact: "Improves consistency of trust signals across all pages.",
-        status: "todo",
-        effort: 2,
-        confidence: 5,
-        owner: "Brand/Editorial",
-        dueDate: "2026-05-20",
-      },
-      {
-        id: "future-6",
-        categoryId: "future-quality",
-        title: "Align SEO reporting with conversion outcomes",
-        description:
-          "Track assisted conversions, not just sessions and rankings.",
-        detail:
-          "Add conversion-influenced KPIs per landing page and content cluster. Prioritize optimization by business impact.",
-        priority: "high",
-        impact: "Ensures SEO roadmap aligns with revenue, not vanity metrics.",
-        status: "todo",
-        effort: 3,
-        confidence: 4,
-        owner: "Analytics",
-        dueDate: "2026-05-30",
-      },
-      {
-        id: "future-7",
-        categoryId: "future-quality",
-        title: "Implement entity-based internal linking recommendations",
-        description:
-          "Use topic entities to drive smarter link placement at scale.",
-        detail:
-          "Generate suggested links based on entity co-occurrence and topical relationship graphs rather than manual anchor insertion.",
-        priority: "medium",
-        impact: "Strengthens semantic relevance and topical authority pathways.",
-        status: "todo",
-        effort: 4,
-        confidence: 3,
-        owner: "Tech SEO",
-        dueDate: "2026-06-03",
-      },
-      {
-        id: "future-8",
-        categoryId: "future-quality",
-        title: "Launch structured content experimentation framework",
-        description:
-          "Run controlled tests on titles, intros, section order, and CTA patterns.",
-        detail:
-          "Define hypotheses, traffic split rules, 14-28 day windows, and clear success metrics for CTR, dwell time, and assisted conversions.",
-        priority: "medium",
-        impact: "Creates repeatable optimization learning loop.",
-        status: "todo",
-        effort: 3,
-        confidence: 4,
-        owner: "Growth",
-        dueDate: "2026-06-06",
-      },
-      {
-        id: "future-9",
-        categoryId: "future-quality",
-        title: "Prepare internationalization SEO readiness plan",
-        description:
-          "Ensure expansion-ready foundations before launching new locales.",
-        detail:
-          "Define hreflang strategy, locale-specific keyword maps, translated metadata rules, and regional competitor benchmark baselines.",
-        priority: "low",
-        impact: "Reduces technical debt and launch risk for new markets.",
-        status: "todo",
-        effort: 4,
-        confidence: 3,
-        owner: "International SEO",
-        dueDate: "2026-06-12",
-      },
-      {
-        id: "future-10",
-        categoryId: "future-quality",
-        title: "Define content governance and lifecycle policy",
-        description:
-          "Prevent quality drift with explicit ownership and lifecycle rules.",
-        detail:
-          "Set rules for ownership changes, SLA expectations, merge/sunset criteria, archive policy, and quarterly quality review process.",
-        priority: "medium",
-        impact: "Keeps long-term content inventory healthy and manageable.",
-        status: "todo",
-        effort: 2,
-        confidence: 5,
-        owner: "Content Ops",
-        dueDate: "2026-05-26",
       },
     ],
   },

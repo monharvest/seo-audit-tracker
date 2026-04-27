@@ -7,12 +7,29 @@ import { auditMeta, categories, Category, ChecklistItem, Status } from "@/lib/au
 type ReportFormat = "json" | "md";
 type ScheduleFrequency = "off" | "daily" | "weekly";
 
+export type DiagnosticSeverity = "error" | "warning" | "info";
+
+export interface Diagnostic {
+  severity: DiagnosticSeverity;
+  message: string;
+}
+
+export interface HealthScore {
+  score: number;
+  grade: "A" | "B" | "C" | "D" | "F";
+  errors: number;
+  warnings: number;
+  infos: number;
+}
+
 interface RetestHistoryEntry {
   checkedAt: string;
   site: string;
   doneCount: number;
   todoCount: number;
   highTodoCount: number;
+  healthScore?: number;
+  healthGrade?: HealthScore["grade"];
 }
 
 interface AuditContextValue {
@@ -32,7 +49,8 @@ interface AuditContextValue {
   lastRetestAt: string | null;
   auditDateLabel: string;
   retestNotes: string[];
-  itemDiagnostics: Record<string, string[]>;
+  itemDiagnostics: Record<string, Diagnostic[]>;
+  health: HealthScore | null;
   totalItems: number;
   completedItems: number;
   overallProgress: number;
@@ -106,7 +124,8 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
   const [retestProgress, setRetestProgress] = useState(0);
   const [lastRetestAt, setLastRetestAt] = useState<string | null>(null);
   const [retestNotes, setRetestNotes] = useState<string[]>([]);
-  const [itemDiagnostics, setItemDiagnostics] = useState<Record<string, string[]>>({});
+  const [itemDiagnostics, setItemDiagnostics] = useState<Record<string, Diagnostic[]>>({});
+  const [health, setHealth] = useState<HealthScore | null>(null);
   const [scheduleFrequency, setScheduleFrequency] = useState<ScheduleFrequency>(loadScheduleFrequency);
   const [retestHistory, setRetestHistory] = useState<RetestHistoryEntry[]>(loadRetestHistory);
 
@@ -183,6 +202,7 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
       setStatuses({});
       setRetestNotes([]);
       setItemDiagnostics({});
+      setHealth(null);
       setLastRetestAt(null);
     }
     setTargetSiteState(normalized);
@@ -192,6 +212,7 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
     setStatuses({});
     setRetestNotes([]);
     setItemDiagnostics({});
+    setHealth(null);
   }, []);
 
   const buildReport = useCallback(() => {
@@ -208,6 +229,7 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
         completedItems,
         overallProgress,
         weightedProgress,
+        health,
       },
       retestNotes,
       diagnostics: itemDiagnostics,
@@ -236,6 +258,7 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
   }, [
     auditDateLabel,
     completedItems,
+    health,
     itemDiagnostics,
     lastRetestAt,
     mergedCategories,
@@ -278,11 +301,20 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
           "",
           `## Summary`,
           "",
+        ];
+
+        if (health) {
+          lines.push(
+            `- Site Health: **${health.score}/100 (Grade ${health.grade})**`,
+            `- Findings: ${health.errors} errors, ${health.warnings} warnings, ${health.infos} info`,
+          );
+        }
+        lines.push(
           `- Progress: ${overallProgress}%`,
           `- Weighted Progress: ${weightedProgress}%`,
           `- Completed: ${completedItems}/${totalItems}`,
           "",
-        ];
+        );
 
         if (retestNotes.length > 0) {
           lines.push("## Retest Notes", "");
@@ -298,7 +330,8 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
             if (diag.length === 0) continue;
             lines.push(`### ${itemId}`, "");
             for (const entry of diag) {
-              lines.push(`- ${entry}`);
+              const tag = entry.severity === "error" ? "🔴" : entry.severity === "warning" ? "🟠" : "🔵";
+              lines.push(`- ${tag} ${entry.message}`);
             }
             lines.push("");
           }
@@ -331,11 +364,16 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
     [
       buildReport,
       completedItems,
+      health,
+      itemDiagnostics,
+      mergedCategories,
       overallProgress,
       retestNotes,
       targetSite,
       totalItems,
       weightedProgress,
+      auditDateLabel,
+      lastRetestAt,
     ]
   );
 
@@ -406,8 +444,31 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
         statuses?: Record<string, Status>;
         checkedAt?: string;
         notes?: string[];
-        diagnostics?: Record<string, string[]>;
+        diagnostics?: Record<string, unknown>;
+        health?: HealthScore;
       };
+
+      // Coerce legacy string[] diagnostics to Diagnostic[] so a stale server response
+      // doesn't blow up the typed client. New server returns {severity, message}.
+      const normalizedDiagnostics: Record<string, Diagnostic[]> = {};
+      if (data.diagnostics && typeof data.diagnostics === "object") {
+        for (const [key, value] of Object.entries(data.diagnostics)) {
+          if (!Array.isArray(value)) continue;
+          normalizedDiagnostics[key] = value.map((entry) => {
+            if (typeof entry === "string") {
+              return { severity: "warning", message: entry } as Diagnostic;
+            }
+            if (entry && typeof entry === "object" && "message" in entry) {
+              const e = entry as { severity?: DiagnosticSeverity; message?: string };
+              return {
+                severity: e.severity === "error" || e.severity === "info" ? e.severity : "warning",
+                message: typeof e.message === "string" ? e.message : String(e),
+              };
+            }
+            return { severity: "warning", message: String(entry) };
+          });
+        }
+      }
 
       if (data.statuses) {
         let resolvedStatuses: Record<string, Status> | null = null;
@@ -428,6 +489,8 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
               doneCount,
               todoCount,
               highTodoCount,
+              healthScore: data.health?.score,
+              healthGrade: data.health?.grade,
             },
             ...prev,
           ].slice(0, 30));
@@ -440,15 +503,15 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
 
       setLastRetestAt(data.checkedAt ?? new Date().toISOString());
       setRetestNotes(Array.isArray(data.notes) ? data.notes : []);
-      setItemDiagnostics(
-        data.diagnostics && typeof data.diagnostics === "object" ? data.diagnostics : {}
-      );
+      setItemDiagnostics(normalizedDiagnostics);
+      setHealth(data.health ?? null);
     } catch (err) {
       clearInterval(interval);
       setRetestProgress(0);
       const message = err instanceof Error ? err.message : "Retest failed";
       setRetestNotes([message]);
       setItemDiagnostics({});
+      setHealth(null);
     } finally {
       setIsRetesting(false);
     }
@@ -489,6 +552,7 @@ export function AuditProvider({ children }: { children: React.ReactNode }) {
         auditDateLabel,
         retestNotes,
         itemDiagnostics,
+        health,
         totalItems,
         completedItems,
         overallProgress,

@@ -33,6 +33,18 @@ export function ChecklistItemCard({ item }: ChecklistItemCardProps) {
     return url.replace(/[),.;]+$/, "");
   };
 
+  const severityStyle: Record<"error" | "warning" | "info", string> = {
+    error: "text-red-700 bg-red-50 border-red-200",
+    warning: "text-amber-800 bg-amber-50 border-amber-200",
+    info: "text-blue-700 bg-blue-50 border-blue-200",
+  };
+
+  const severityLabel: Record<"error" | "warning" | "info", string> = {
+    error: "ERROR",
+    warning: "WARN",
+    info: "INFO",
+  };
+
   useEffect(() => {
     const handleJump = (event: Event) => {
       const custom = event as CustomEvent<{ categoryId?: string; itemId?: string }>;
@@ -195,14 +207,19 @@ export function ChecklistItemCard({ item }: ChecklistItemCardProps) {
                         </p>
                         <div className="space-y-1">
                           {diagnosticLinks.map((entry) => {
-                            const parsedUrl = extractUrlFromEntry(entry);
+                            const parsedUrl = extractUrlFromEntry(entry.message);
                             const data = parsedUrl ? inspectResults[parsedUrl] : undefined;
                             const error = parsedUrl ? inspectErrors[parsedUrl] : undefined;
                             return (
-                              <div key={entry}>
-                                <code className="block font-mono-editorial text-[11px] text-red-700 bg-red-50 px-1.5 py-1 rounded">
-                                  {entry}
-                                </code>
+                              <div key={entry.message}>
+                                <div
+                                  className={`flex items-start gap-1.5 font-mono-editorial text-[11px] px-1.5 py-1 rounded border ${severityStyle[entry.severity]}`}
+                                >
+                                  <span className="font-bold text-[9px] mt-0.5 shrink-0">
+                                    {severityLabel[entry.severity]}
+                                  </span>
+                                  <code className="block">{entry.message}</code>
+                                </div>
                                 {parsedUrl && (
                                   <button
                                     type="button"
